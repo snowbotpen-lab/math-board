@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Collaborative Math Whiteboard</title>
     <!-- Load PeerJS from official CDN -->
-    <script src="https://unpkg.com"></script>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <style>
         * {
             box-sizing: border-box;
@@ -68,7 +68,15 @@
             left: 0;
             width: 100%;
             height: 100%;
+            /* Mathematics graph paper grid pattern */
             background-color: #ffffff;
+            background-image: 
+                linear-gradient(to right, rgba(0, 123, 255, 0.15) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(0, 123, 255, 0.15) 1px, transparent 1px),
+                linear-gradient(to right, rgba(0, 123, 255, 0.05) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(0, 123, 255, 0.05) 1px, transparent 1px);
+            background-size: 100px 100px, 100px 100px, 20px 20px, 20px 20px;
+            background-position: center center;
         }
         canvas {
             display: block;
@@ -96,7 +104,7 @@
             <button id="tool-eraser">🧽 Eraser</button>
             <button id="tool-clear">🗑️ Clear Screen</button>
         </div>
-        <div id="share-box">Generating link...</div>
+        <div id="share-box" id="share-url">Generating link...</div>
         <div id="status">Connecting to network...</div>
     </div>
 
@@ -110,25 +118,14 @@
         const statusEl = document.getElementById('status');
         const shareEl = document.getElementById('share-box');
         
-        let drawingActions = [];
         let isDrawing = false;
-        let currentTool = 'pen'; 
+        let currentTool = 'pen'; // 'pen' or 'eraser'
         let lastX = 0;
         let lastY = 0;
-
-        let scale = 1;
-        let offsetX = 0;
-        let offsetY = 0;
-
-        let isPanning = false;
-        let startPanX = 0, startPanY = 0;
-        let startPinchDist = 1;
-        let startPinchScale = 1;
-        let pinchMidX = 0, pinchMidY = 0;
-
         let peer = null;
         let conn = null;
 
+        // Tool Selection
         document.getElementById('tool-pen').addEventListener('click', (e) => {
             currentTool = 'pen';
             document.getElementById('tool-pen').classList.add('active');
@@ -140,170 +137,174 @@
             document.getElementById('tool-pen').classList.remove('active');
         });
         document.getElementById('tool-clear').addEventListener('click', () => {
-            drawingActions = [];
-            redrawCanvas();
+            clearCanvas();
             sendData({ type: 'clear' });
         });
 
-        function toWorldX(screenX) { return (screenX - offsetX) / scale; }
-        function toWorldY(screenY) { return (screenY - offsetY) / scale; }
-
-        function redrawCanvas() {
+        function clearCanvas() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-            // 1. Draw the infinite grid background completely separate first
-            drawGrid();
-
-            // 2. Put down your math lines on top of the grid
-            ctx.save();
-            ctx.translate(offsetX, offsetY);
-            ctx.scale(scale, scale);
-
-            drawingActions.forEach(action => {
-                ctx.beginPath();
-                ctx.moveTo(action.x1, action.y1);
-                ctx.lineTo(action.x2, action.y2);
-
-                if (action.tool === 'pen') {
-                    ctx.globalCompositeOperation = 'source-over';
-                    ctx.strokeStyle = '#222222';
-                    ctx.lineWidth = 3 / scale; 
-                } else {
-                    // Erase drawn canvas elements cleanly without hurting the grid layers
-                    ctx.globalCompositeOperation = 'destination-out';
-                    ctx.lineWidth = 30 / scale;
-                }
-                ctx.stroke();
-            });
-
-            ctx.restore();
         }
 
-        function drawGrid() {
-            ctx.save();
-            // Apply zoom factors locally for rendering lines
-            ctx.translate(offsetX, offsetY);
-            ctx.scale(scale, scale);
-            
-            const left = toWorldX(0);
-            const right = toWorldX(canvas.width);
-            const top = toWorldY(0);
-            const bottom = toWorldY(canvas.height);
-
-            ctx.lineWidth = 1 / scale;
-
-            // Major Blocks
-            ctx.beginPath();
-            ctx.strokeStyle = 'rgba(0, 123, 255, 0.15)';
-            for (let x = Math.floor(left / 100) * 100; x <= right; x += 100) {
-                ctx.moveTo(x, top); ctx.lineTo(x, bottom);
-            }
-            for (let y = Math.floor(top / 100) * 100; y <= bottom; y += 100) {
-                ctx.moveTo(left, y); ctx.lineTo(right, y);
-            }
-            ctx.stroke();
-
-            // Minor Blocks
-            ctx.beginPath();
-            ctx.strokeStyle = 'rgba(0, 123, 255, 0.05)';
-            for (let x = Math.floor(left / 20) * 20; x <= right; x += 20) {
-                ctx.moveTo(x, top); ctx.lineTo(x, bottom);
-            }
-            for (let y = Math.floor(top / 20) * 20; y <= bottom; y += 20) {
-                ctx.moveTo(left, y); ctx.lineTo(right, y);
-            }
-            ctx.stroke();
-
-            ctx.restore();
-        }
-
+        // Resize Canvas to fit window
         function resizeCanvas() {
+            // Save current drawing content
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = canvas.width;
+            tempCanvas.height = canvas.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(canvas, 0, 0);
+
+            // Resize
             canvas.width = window.innerWidth;
             canvas.height = window.innerHeight;
+
+            // Restore canvas settings
+            setupCanvasContext();
+            
+            // Restore drawing content
+            ctx.drawImage(tempCanvas, 0, 0);
+        }
+
+        function setupCanvasContext() {
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
-            redrawCanvas();
         }
 
         window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
 
+        // Drawing Logic
         function startDrawing(x, y) {
             isDrawing = true;
-            lastX = toWorldX(x);
-            lastY = toWorldY(y);
+            [lastX, lastY] = [x, y];
         }
 
         function draw(x, y) {
             if (!isDrawing) return;
 
-            const currentWorldX = toWorldX(x);
-            const currentWorldY = toWorldY(y);
+            ctx.beginPath();
+            ctx.moveTo(lastX, lastY);
+            ctx.lineTo(x, y);
 
-            const action = {
+            if (currentTool === 'pen') {
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.strokeStyle = '#222222';
+                ctx.lineWidth = 3;
+            } else {
+                ctx.globalCompositeOperation = 'destination-out';
+                ctx.lineWidth = 30;
+            }
+
+            ctx.stroke();
+
+            // Send standard coordinates relative to screen percent to handle different screen sizes nicely
+            sendData({
+                type: 'draw',
                 tool: currentTool,
-                x1: lastX,
-                y1: lastY,
-                x2: currentWorldX,
-                y2: currentWorldY
-            };
+                x1: lastX / canvas.width,
+                y1: lastY / canvas.height,
+                x2: x / canvas.width,
+                y2: y / canvas.height
+            });
 
-            drawingActions.push(action);
-            sendData({ type: 'draw', action: action });
-            
-            redrawCanvas();
-
-            lastX = currentWorldX;
-            lastY = currentWorldY;
+            [lastX, lastY] = [x, y];
         }
 
-        function zoomAroundPoint(zoomFactor, mouseX, mouseY) {
-            const newScale = Math.min(Math.max(scale * zoomFactor, 0.1), 8);
-            if (newScale === scale) return;
-
-            const worldX = toWorldX(mouseX);
-            const worldY = toWorldY(mouseY);
-
-            scale = newScale;
-            offsetX = mouseX - worldX * scale;
-            offsetY = mouseY - worldY * scale;
-
-            redrawCanvas();
+        function stopDrawing() {
+            isDrawing = false;
         }
 
-        canvas.addEventListener('mousedown', (e) => {
-            if (e.button === 0) {
-                startDrawing(e.clientX, e.clientY);
-            } else if (e.button === 2) {
-                isPanning = true;
-                startPanX = e.clientX - offsetX;
-                startPanY = e.clientY - offsetY;
-            }
-        });
+        // Mouse Events
+        canvas.addEventListener('mousedown', (e) => startDrawing(e.clientX, e.clientY));
+        canvas.addEventListener('mousemove', (e) => draw(e.clientX, e.clientY));
+        canvas.addEventListener('mouseup', stopDrawing);
+        canvas.addEventListener('mouseout', stopDrawing);
 
-        canvas.addEventListener('mousemove', (e) => {
-            if (isDrawing) {
-                draw(e.clientX, e.clientY);
-            } else if (isPanning) {
-                offsetX = e.clientX - startPanX;
-                offsetY = e.clientY - startPanY;
-                redrawCanvas();
-            }
-        });
-
-        canvas.addEventListener('mouseup', () => { isDrawing = false; isPanning = false; });
-        canvas.addEventListener('mouseout', () => { isDrawing = false; isPanning = false; });
-        canvas.addEventListener('contextmenu', e => e.preventDefault());
-
-        canvas.addEventListener('wheel', (e) => {
-            e.preventDefault();
-            const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-            zoomAroundPoint(factor, e.clientX, e.clientY);
-        }, { passive: false });
-
+        // Touch Events for Tablets/Touch Screens
         canvas.addEventListener('touchstart', (e) => {
             if (e.touches.length === 1) {
                 const t = e.touches[0];
                 startDrawing(t.clientX, t.clientY);
-            } else if (e.touches.length === 2) {
-                isDrawing = false;
-                isPanning = true;
+                e.preventDefault();
+            }
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 1) {
+                const t = e.touches[0];
+                draw(t.clientX, t.clientY);
+                e.preventDefault();
+            }
+        });
+        canvas.addEventListener('touchend', stopDrawing);
+
+        // Remote Draw Handling
+        function handleRemoteDraw(data) {
+            ctx.beginPath();
+            ctx.moveTo(data.x1 * canvas.width, data.y1 * canvas.height);
+            ctx.lineTo(data.x2 * canvas.width, data.y2 * canvas.height);
+
+            if (data.tool === 'pen') {
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.strokeStyle = '#222222';
+                ctx.lineWidth = 3;
+            } else {
+                ctx.globalCompositeOperation = 'destination-out';
+                ctx.lineWidth = 30;
+            }
+            ctx.stroke();
+        }
+
+        // Connection Networking (PeerJS)
+        const urlParams = new URLSearchParams(window.location.search);
+        const targetRoom = urlParams.get('room');
+
+        if (targetRoom) {
+            // We are the joiner
+            peer = new Peer();
+            peer.on('open', (id) => {
+                statusEl.innerText = "Connecting to partner...";
+                shareEl.innerText = window.location.href;
+                conn = peer.connect(targetRoom);
+                setupConnection();
+            });
+        } else {
+            // We are the host
+            peer = new Peer();
+            peer.on('open', (id) => {
+                const newUrl = window.location.origin + window.location.pathname + '?room=' + id;
+                window.history.pushState({ path: newUrl }, '', newUrl);
+                shareEl.innerText = "Link: " + newUrl;
+                statusEl.innerText = "Waiting for partner...";
+            });
+            peer.on('connection', (connection) => {
+                conn = connection;
+                setupConnection();
+            });
+        }
+
+        function setupConnection() {
+            conn.on('open', () => {
+                statusEl.innerText = "Connected to partner! 😊";
+                statusEl.classList.add('connected');
+            });
+            conn.on('data', (data) => {
+                if (data.type === 'draw') {
+                    handleRemoteDraw(data);
+                } else if (data.type === 'clear') {
+                    clearCanvas();
+                }
+            });
+            conn.on('close', () => {
+                statusEl.innerText = "Partner disconnected.";
+                statusEl.classList.remove('connected');
+            });
+        }
+
+        function sendData(data) {
+            if (conn && conn.open) {
+                conn.send(data);
+            }
+        }
+    </script>
+</body>
+</html>
