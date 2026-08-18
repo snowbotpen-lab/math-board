@@ -339,11 +339,6 @@
         })
       }
 
-      peer.on('connection', connection => {
-        conn = connection
-        setupConnectionHandlers()
-      })
-
       function connectToPeer(targetId) {
         statusEl.innerText = 'Connecting...'
         conn = peer.connect(targetId)
@@ -418,8 +413,9 @@
           conn.send(data)
         }
       }
+      resizeCanvas();
 
-      initPeer()
+      initPeer();
     </script>
   </body>
 </html>
