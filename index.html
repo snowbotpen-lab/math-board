@@ -309,7 +309,16 @@
       let roomId = urlParams.get('room')
 
       function initPeer() {
-        peer = new Peer()
+        // Add a secure config object to help punch through strict firewalls
+        peer = new Peer({
+          config: {
+            iceServers: [
+              { urls: 'stun:://google.com' },
+              { urls: 'stun:://google.com' },
+              { urls: 'stun:://google.com' }
+            ]
+          }
+        })
 
         peer.on('open', id => {
           if (!roomId) {
@@ -329,6 +338,11 @@
           setupConnectionHandlers()
         })
       }
+
+      peer.on('connection', connection => {
+        conn = connection
+        setupConnectionHandlers()
+      })
 
       function connectToPeer(targetId) {
         statusEl.innerText = 'Connecting...'
