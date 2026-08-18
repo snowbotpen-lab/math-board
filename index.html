@@ -73,30 +73,7 @@
         left: 0;
         width: 200%;
         height: 200%;
-        /* Mathematics graph paper grid pattern */
-        background-color: #ffffff;
-        background-image: linear-gradient(
-            to right,
-            rgba(0, 123, 255, 0.15) 1px,
-            transparent 1px
-          ),
-          linear-gradient(
-            to bottom,
-            rgba(0, 123, 255, 0.15) 1px,
-            transparent 1px
-          ),
-          linear-gradient(
-            to right,
-            rgba(0, 123, 255, 0.05) 1px,
-            transparent 1px
-          ),
-          linear-gradient(
-            to bottom,
-            rgba(0, 123, 255, 0.05) 1px,
-            transparent 1px
-          );
-        background-size: 100px 100px, 100px 100px, 20px 20px, 20px 20px;
-        background-position: center center;
+        background-color: #ffffff; /* Just a solid white background */
       }
       canvas {
         display: block;
@@ -104,6 +81,7 @@
         height: 100%;
         touch-action: none;
       }
+
       #share-box {
         font-size: 12px;
         background: #e9ecef;
@@ -137,19 +115,23 @@
       const statusEl = document.getElementById('status')
       const shareEl = document.getElementById('share-box')
 
+      // Unified data architecture
+      let drawingActions = []
       let isDrawing = false
-      let currentTool = 'pen' // 'pen' or 'eraser'
+      let currentTool = 'pen'
       let lastX = 0
       let lastY = 0
       let peer = null
       let conn = null
-      let isPanning = false // True only when holding right-click
-      let scrollLeft = 0 // Current horizontal view position
-      let scrollTop = 0 // Current vertical view position
-      let startMouseX = 0 // Anchored click point X
-      let startMouseY = 0 // Anchored click point Y
 
-      // Tool Selection
+      // Camera scroll tracking variables
+      let isPanning = false
+      let scrollLeft = 0
+      let scrollTop = 0
+      let startMouseX = 0
+      let startMouseY = 0
+
+      // Tool Selection UI Listening
       document.getElementById('tool-pen').addEventListener('click', e => {
         currentTool = 'pen'
         document.getElementById('tool-pen').classList.add('active')
@@ -166,51 +148,42 @@
       })
 
       function clearCanvas() {
+        drawingActions = []
+        redrawCanvas()
+      }
+
+      // Redraw loop that handles background grid and sketches simultaneously
+      function redrawCanvas() {
         ctx.clearRect(0, 0, canvas.width, canvas.height)
+
+        // 1. STEP ONE: Draw your vector handwriting lines and erasures FIRST
+        drawingActions.forEach(action => {
+          ctx.beginPath()
+          ctx.moveTo(action.x1 - scrollLeft, action.y1 - scrollTop)
+          ctx.lineTo(action.x2 - scrollLeft, action.y2 - scrollTop)
+
+          if (action.tool === 'pen') {
+            ctx.globalCompositeOperation = 'source-over'
+            ctx.strokeStyle = '#222222'
+            ctx.lineWidth = 3
+          } else {
+            ctx.globalCompositeOperation = 'destination-out'
+            ctx.lineWidth = 30
+          }
+          ctx.stroke()
+        })
+
+        // 2. STEP TWO: Run your separate grid layout function LAST
+        drawGrid()
       }
 
-      // Resize Canvas to fit window
-      function resizeCanvas() {
-        // Save current drawing content
-        const tempCanvas = document.createElement('canvas')
-        tempCanvas.width = canvas.width
-        tempCanvas.height = canvas.height
-        const tempCtx = tempCanvas.getContext('2d')
-        tempCtx.drawImage(canvas, 0, 0)
-
-        // Resize
-        canvas.width = window.innerWidth * 2
-        canvas.height = window.innerHeight * 2
-
-        // Restore canvas settings
-        setupCanvasContext()
-
-        // Restore drawing content
-        ctx.drawImage(tempCanvas, 0, 0)
-      }
-
-      function setupCanvasContext() {
-        ctx.lineCap = 'round'
-        ctx.lineJoin = 'round'
-      }
-
-      window.addEventListener('resize', resizeCanvas)
-      resizeCanvas()
-
-      // Drawing Logic
-      function startDrawing(x, y) {
-        isDrawing = true
-        ;[lastX, lastY] = [x, y]
-      }
-
-      function draw(x, y) {
-        if (!isDrawing) return
-
+      // 2. Draw your vector brush strokes on top factoring in scrolling offsets
+      drawingActions.forEach(action => {
         ctx.beginPath()
-        ctx.moveTo(lastX, lastY)
-        ctx.lineTo(x, y)
+        ctx.moveTo(action.x1 - scrollLeft, action.y1 - scrollTop)
+        ctx.lineTo(action.x2 - scrollLeft, action.y2 - scrollTop)
 
-        if (currentTool === 'pen') {
+        if (action.tool === 'pen') {
           ctx.globalCompositeOperation = 'source-over'
           ctx.strokeStyle = '#222222'
           ctx.lineWidth = 3
@@ -218,72 +191,98 @@
           ctx.globalCompositeOperation = 'destination-out'
           ctx.lineWidth = 30
         }
-
         ctx.stroke()
+      })
 
-        // Send standard coordinates relative to screen percent to handle different screen sizes nicely
-        sendData({
-          type: 'draw',
+      // Setup the exact physical layout resolution dimensions
+      function resizeCanvas() {
+        canvas.width = window.innerWidth * 2
+        canvas.height = window.innerHeight * 2
+        ctx.lineCap = 'round'
+        ctx.lineJoin = 'round'
+        redrawCanvas()
+      }
+
+      window.addEventListener('resize', resizeCanvas)
+      resizeCanvas()
+
+      function startDrawing(x, y) {
+        isDrawing = true
+        lastX = x
+        lastY = y
+      }
+
+      function draw(x, y) {
+        if (!isDrawing) return
+
+        const action = {
           tool: currentTool,
           x1: lastX,
           y1: lastY,
           x2: x,
           y2: y
-        })
-        ;[lastX, lastY] = [x, y]
+        }
+
+        drawingActions.push(action)
+        sendData({ type: 'draw', action: action })
+
+        redrawCanvas()
+
+        lastX = x
+        lastY = y
       }
 
       function stopDrawing() {
         isDrawing = false
       }
 
-      // Mouse Events
-      // Mouse Click Down Trigger
+      // Refactored Mouse Listeners: Clean separation between drawing and scrolling
       canvas.addEventListener('mousedown', e => {
         if (e.button === 0) {
-          // Left click: Run your original drawing code
+          // Left click maps to precise pen position + scroll offset
           startDrawing(e.clientX + scrollLeft, e.clientY + scrollTop)
         } else if (e.button === 2) {
-          // Right click: Lock anchor points to begin scrolling
+          // Right click or stylus barrel button blocks drawing completely and starts pan
+          isDrawing = false
           isPanning = true
           startMouseX = e.clientX
           startMouseY = e.clientY
         }
       })
 
-      // Mouse Movement Trigger
       canvas.addEventListener('mousemove', e => {
         if (isDrawing) {
-          // Left click drag: Draw line factoring in current scroll position
           draw(e.clientX + scrollLeft, e.clientY + scrollTop)
         } else if (isPanning) {
-          // Right click drag: Calculate movement differences
           const deltaX = startMouseX - e.clientX
           const deltaY = startMouseY - e.clientY
 
-          // Shift the canvas container view using native window scrolling
-          window.scrollTo(window.scrollX + deltaX, window.scrollY + deltaY)
+          // Shift internal scroll trackers smoothly
+          scrollLeft = Math.max(
+            0,
+            Math.min(window.innerWidth, scrollLeft + deltaX)
+          )
+          scrollTop = Math.max(
+            0,
+            Math.min(window.innerHeight, scrollTop + deltaY)
+          )
 
-          // Track the total offset distance internally
-          scrollLeft = window.scrollX
-          scrollTop = window.scrollY
-
-          // Reset tracking anchors to current pointer position
           startMouseX = e.clientX
           startMouseY = e.clientY
+
+          redrawCanvas()
         }
       })
 
-      // Mouse Release Trigger
-      window.addEventListener('mouseup', e => {
+      window.addEventListener('mouseup', () => {
         isDrawing = false
         isPanning = false
       })
 
-      // Block the standard browser pop-up menu when right-clicking the canvas
+      canvas.addEventListener('mouseout', stopDrawing)
       canvas.addEventListener('contextmenu', e => e.preventDefault())
 
-      // Touch Events for Tablets/Touch Screens
+      // Touch Listeners for your son's tablet screen layout
       canvas.addEventListener('touchstart', e => {
         if (e.touches.length === 1) {
           const t = e.touches[0]
@@ -300,68 +299,104 @@
       })
       canvas.addEventListener('touchend', stopDrawing)
 
-      // Remote Draw Handling
+      // Network Integration Core
       function handleRemoteDraw(data) {
-        ctx.beginPath()
-        ctx.moveTo(data.x1, data.y1)
-        ctx.lineTo(data.x2, data.y2)
-
-        if (data.tool === 'pen') {
-          ctx.globalCompositeOperation = 'source-over'
-          ctx.strokeStyle = '#222222'
-          ctx.lineWidth = 3
-        } else {
-          ctx.globalCompositeOperation = 'destination-out'
-          ctx.lineWidth = 30
-        }
-        ctx.stroke()
+        drawingActions.push(data.action)
+        redrawCanvas()
       }
 
-      // Connection Networking (PeerJS)
       const urlParams = new URLSearchParams(window.location.search)
-      const targetRoom = urlParams.get('room')
+      let roomId = urlParams.get('room')
 
-      if (targetRoom) {
-        // We are the joiner
+      function initPeer() {
         peer = new Peer()
+
         peer.on('open', id => {
-          statusEl.innerText = 'Connecting to partner...'
-          shareEl.innerText = window.location.href
-          conn = peer.connect(targetRoom)
-          setupConnection()
-        })
-      } else {
-        // We are the host
-        peer = new Peer()
-        peer.on('open', id => {
-          const newUrl =
-            window.location.origin + window.location.pathname + '?room=' + id
-          window.history.pushState({ path: newUrl }, '', newUrl)
-          shareEl.innerText = 'Link: ' + newUrl
+          if (!roomId) {
+            roomId = id.substring(0, 6)
+            window.history.replaceState({}, '', `?room=${roomId}`)
+          }
+          shareEl.textContent = window.location.href
           statusEl.innerText = 'Waiting for partner...'
+
+          if (urlParams.get('room')) {
+            connectToPeer(urlParams.get('room'))
+          }
         })
+
         peer.on('connection', connection => {
           conn = connection
-          setupConnection()
+          setupConnectionHandlers()
         })
       }
 
-      function setupConnection() {
+      function connectToPeer(targetId) {
+        statusEl.innerText = 'Connecting...'
+        conn = peer.connect(targetId)
+        setupConnectionHandlers()
+      }
+
+      function setupConnectionHandlers() {
         conn.on('open', () => {
           statusEl.innerText = 'Connected to partner! 😊'
           statusEl.classList.add('connected')
+          sendData({ type: 'sync', history: drawingActions })
         })
+
         conn.on('data', data => {
           if (data.type === 'draw') {
             handleRemoteDraw(data)
           } else if (data.type === 'clear') {
             clearCanvas()
+          } else if (data.type === 'sync') {
+            drawingActions = data.history
+            redrawCanvas()
           }
         })
+
         conn.on('close', () => {
           statusEl.innerText = 'Partner disconnected.'
           statusEl.classList.remove('connected')
         })
+      }
+      function drawGrid() {
+        ctx.save() // Locks your current pen settings safely away
+
+        // Tells the browser to slide the grid BEHIND the eraser holes
+        ctx.globalCompositeOperation = 'destination-over'
+
+        ctx.lineWidth = 1
+
+        const maxW = window.innerWidth * 2
+        const maxH = window.innerHeight * 2
+
+        // Major Grid Lines (100px)
+        ctx.beginPath()
+        ctx.strokeStyle = 'rgba(0, 123, 255, 0.15)'
+        for (let x = 0; x <= maxW; x += 100) {
+          ctx.moveTo(x - scrollLeft, 0)
+          ctx.lineTo(x - scrollLeft, maxH)
+        }
+        for (let y = 0; y <= maxH; y += 100) {
+          ctx.moveTo(0, y - scrollTop)
+          ctx.lineTo(maxW, y - scrollTop)
+        }
+        ctx.stroke()
+
+        // Minor Grid Lines (20px)
+        ctx.beginPath()
+        ctx.strokeStyle = 'rgba(0, 123, 255, 0.05)'
+        for (let x = 0; x <= maxW; x += 20) {
+          ctx.moveTo(x - scrollLeft, 0)
+          ctx.lineTo(x - scrollLeft, maxH)
+        }
+        for (let y = 0; y <= maxH; y += 20) {
+          ctx.moveTo(0, y - scrollTop)
+          ctx.lineTo(maxW, y - scrollTop)
+        }
+        ctx.stroke()
+
+        ctx.restore() // Re-opens your drawing settings exactly as they were
       }
 
       function sendData(data) {
@@ -369,6 +404,8 @@
           conn.send(data)
         }
       }
+
+      initPeer()
     </script>
   </body>
 </html>
