@@ -101,7 +101,7 @@
         <button id="tool-eraser">🧽 Eraser</button>
         <button id="tool-clear">🗑️ Clear Screen</button>
       </div>
-      <div id="share-box" id="share-url">Generating link...</div>
+      <div id="share-box">Generating link...</div>
       <div id="status">Connecting to network...</div>
     </div>
 
@@ -156,7 +156,6 @@
       function redrawCanvas() {
         ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-        // 1. STEP ONE: Draw your vector handwriting lines and erasures FIRST
         drawingActions.forEach(action => {
           ctx.beginPath()
           ctx.moveTo(action.x1 - scrollLeft, action.y1 - scrollTop)
@@ -173,26 +172,8 @@
           ctx.stroke()
         })
 
-        // 2. STEP TWO: Run your separate grid layout function LAST
         drawGrid()
       }
-
-      // 2. Draw your vector brush strokes on top factoring in scrolling offsets
-      drawingActions.forEach(action => {
-        ctx.beginPath()
-        ctx.moveTo(action.x1 - scrollLeft, action.y1 - scrollTop)
-        ctx.lineTo(action.x2 - scrollLeft, action.y2 - scrollTop)
-
-        if (action.tool === 'pen') {
-          ctx.globalCompositeOperation = 'source-over'
-          ctx.strokeStyle = '#222222'
-          ctx.lineWidth = 3
-        } else {
-          ctx.globalCompositeOperation = 'destination-out'
-          ctx.lineWidth = 30
-        }
-        ctx.stroke()
-      })
 
       // Setup the exact physical layout resolution dimensions
       function resizeCanvas() {
@@ -312,17 +293,17 @@
         // Add a secure config object to help punch through strict firewalls
         peer = new Peer({
           config: {
-            iceServers: [
-              {'urls': 'stun:stun.l.google.com:19302'},
-              {'urls': 'stun:stun.l.google.com:19302'},
-              {'urls': 'stun:stun.l.google.com:19302'} 
-            ]
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
           }
         })
 
         peer.on('open', id => {
           if (!roomId) {
-            roomId = id.substring(0, 6)
+            // FIX: use the full id PeerJS assigned, not a truncated copy.
+            // The old code did `id.substring(0, 6)`, which created a room
+            // code that didn't match any real peer on the signaling
+            // server - so a guest could never connect to it.
+            roomId = id
             window.history.replaceState({}, '', `?room=${roomId}`)
           }
           shareEl.textContent = window.location.href
@@ -413,9 +394,9 @@
           conn.send(data)
         }
       }
-      resizeCanvas();
+      resizeCanvas()
 
-      initPeer();
+      initPeer()
     </script>
   </body>
 </html>
