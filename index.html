@@ -37,6 +37,7 @@
         display: flex;
         align-items: center;
         justify-content: space-between;
+        gap: 10px;
         border-radius: 8px;
         box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
         z-index: 10;
@@ -58,6 +59,11 @@
         background: #007bff;
         color: white;
         border-color: #0056b3;
+      }
+      #reconnect-btn {
+        background: #fff3e0;
+        border-color: #ff9800;
+        color: #e65100;
       }
       #status {
         font-size: 14px;
@@ -82,16 +88,6 @@
         touch-action: none;
       }
 
-      #share-box {
-        font-size: 12px;
-        background: #e9ecef;
-        padding: 4px 8px;
-        border-radius: 4px;
-        max-width: 300px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
     </style>
   </head>
   <body>
@@ -101,7 +97,7 @@
         <button id="tool-eraser">🧽 Eraser</button>
         <button id="tool-clear">🗑️ Clear Screen</button>
       </div>
-      <div id="share-box">Generating link...</div>
+      <button id="reconnect-btn">🔄 Reconnect</button>
       <div id="status">Connecting to network...</div>
     </div>
 
@@ -113,9 +109,8 @@
       const canvas = document.getElementById('paintCanvas')
       const ctx = canvas.getContext('2d')
       const statusEl = document.getElementById('status')
-      const shareEl = document.getElementById('share-box')
+      const reconnectBtn = document.getElementById('reconnect-btn')
 
-      // Unified data architecture
       let drawingActions = []
       let isDrawing = false
       let currentTool = 'pen'
@@ -123,6 +118,7 @@
       let lastY = 0
       let peer = null
       let conn = null
+      let myPeerId = null // kept across reconnects so we can reclaim our identity
 
       // Camera scroll tracking variables
       let isPanning = false
@@ -130,6 +126,43 @@
       let scrollTop = 0
       let startMouseX = 0
       let startMouseY = 0
+
+      // Skip recording a new point if the pointer barely moved. Cuts down
+      // how many segments pile up over a long session (less to redraw,
+      // less to send over the connection), without visibly changing lines.
+      const MIN_DRAW_DISTANCE = 4
+
+      // ---- TURN server (Metered, free 500MB/month tier) ----
+      // Heads up: if this repo is public on GitHub, this credential is
+      // visible to anyone who looks at the source - same as it would be
+      // in any browser's dev tools once the page loads. That's normal for
+      // TURN credentials (this is how the protocol works), but on a public
+      // repo it does mean a stranger could rack up usage against your
+      // free 500MB. If the repo is public, worth keeping an eye on usage
+      // in the Metered dashboard, or making the repo private.
+      const ICE_SERVERS = [
+        { urls: 'stun:stun.relay.metered.ca:80' },
+        {
+          urls: 'turn:global.relay.metered.ca:80',
+          username: '66029ed8aacce92ae8bbc53b',
+          credential: 'suE0Xutvr2lRpbPK'
+        },
+        {
+          urls: 'turn:global.relay.metered.ca:80?transport=tcp',
+          username: '66029ed8aacce92ae8bbc53b',
+          credential: 'suE0Xutvr2lRpbPK'
+        },
+        {
+          urls: 'turn:global.relay.metered.ca:443',
+          username: '66029ed8aacce92ae8bbc53b',
+          credential: 'suE0Xutvr2lRpbPK'
+        },
+        {
+          urls: 'turns:global.relay.metered.ca:443?transport=tcp',
+          username: '66029ed8aacce92ae8bbc53b',
+          credential: 'suE0Xutvr2lRpbPK'
+        }
+      ]
 
       // Tool Selection UI Listening
       document.getElementById('tool-pen').addEventListener('click', e => {
@@ -185,7 +218,6 @@
       }
 
       window.addEventListener('resize', resizeCanvas)
-      resizeCanvas()
 
       function startDrawing(x, y) {
         isDrawing = true
@@ -196,7 +228,13 @@
       function draw(x, y) {
         if (!isDrawing) return
 
+        const dx = x - lastX
+        const dy = y - lastY
+        if (dx * dx + dy * dy < MIN_DRAW_DISTANCE * MIN_DRAW_DISTANCE) return
+
         const action = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          ts: Date.now(),
           tool: currentTool,
           x1: lastX,
           y1: lastY,
@@ -220,10 +258,8 @@
       // Refactored Mouse Listeners: Clean separation between drawing and scrolling
       canvas.addEventListener('mousedown', e => {
         if (e.button === 0) {
-          // Left click maps to precise pen position + scroll offset
           startDrawing(e.clientX + scrollLeft, e.clientY + scrollTop)
         } else if (e.button === 2) {
-          // Right click or stylus barrel button blocks drawing completely and starts pan
           isDrawing = false
           isPanning = true
           startMouseX = e.clientX
@@ -238,7 +274,6 @@
           const deltaX = startMouseX - e.clientX
           const deltaY = startMouseY - e.clientY
 
-          // Shift internal scroll trackers smoothly
           scrollLeft = Math.max(
             0,
             Math.min(window.innerWidth, scrollLeft + deltaX)
@@ -286,31 +321,38 @@
         redrawCanvas()
       }
 
+      // Merge a reconnect sync instead of overwriting local history, so
+      // whatever either side drew while disconnected isn't lost. Ordering
+      // across two different computers' clocks is approximate, not exact.
+      function mergeHistory(remoteHistory) {
+        const known = new Set(drawingActions.map(a => a.id))
+        const merged = drawingActions.concat(
+          remoteHistory.filter(a => !known.has(a.id))
+        )
+        merged.sort((a, b) => (a.ts || 0) - (b.ts || 0))
+        drawingActions = merged
+        redrawCanvas()
+      }
+
       const urlParams = new URLSearchParams(window.location.search)
-      let roomId = urlParams.get('room')
+      const isHost = !urlParams.get('room')
+      const targetId = urlParams.get('room')
 
       function initPeer() {
-        // Add a secure config object to help punch through strict firewalls
-        peer = new Peer({
-          config: {
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-          }
-        })
+        peer = myPeerId
+          ? new Peer(myPeerId, { config: { iceServers: ICE_SERVERS } })
+          : new Peer({ config: { iceServers: ICE_SERVERS } })
 
         peer.on('open', id => {
-          if (!roomId) {
-            // FIX: use the full id PeerJS assigned, not a truncated copy.
-            // The old code did `id.substring(0, 6)`, which created a room
-            // code that didn't match any real peer on the signaling
-            // server - so a guest could never connect to it.
-            roomId = id
-            window.history.replaceState({}, '', `?room=${roomId}`)
+          myPeerId = id
+
+          if (isHost) {
+            window.history.replaceState({}, '', `?room=${myPeerId}`)
           }
-          shareEl.textContent = window.location.href
           statusEl.innerText = 'Waiting for partner...'
 
-          if (urlParams.get('room')) {
-            connectToPeer(urlParams.get('room'))
+          if (!isHost) {
+            connectToPeer(targetId)
           }
         })
 
@@ -318,11 +360,26 @@
           conn = connection
           setupConnectionHandlers()
         })
+
+        peer.on('disconnected', () => {
+          statusEl.innerText = 'Lost connection to server...'
+          statusEl.classList.remove('connected')
+        })
+
+        peer.on('close', () => {
+          statusEl.innerText = 'Disconnected.'
+          statusEl.classList.remove('connected')
+        })
+
+        peer.on('error', err => {
+          console.error('Peer error:', err)
+          statusEl.innerText = 'Connection problem.'
+        })
       }
 
-      function connectToPeer(targetId) {
+      function connectToPeer(id) {
         statusEl.innerText = 'Connecting...'
-        conn = peer.connect(targetId)
+        conn = peer.connect(id)
         setupConnectionHandlers()
       }
 
@@ -339,8 +396,7 @@
           } else if (data.type === 'clear') {
             clearCanvas()
           } else if (data.type === 'sync') {
-            drawingActions = data.history
-            redrawCanvas()
+            mergeHistory(data.history)
           }
         })
 
@@ -349,18 +405,28 @@
           statusEl.classList.remove('connected')
         })
       }
+
+      reconnectBtn.addEventListener('click', () => {
+        statusEl.innerText = 'Reconnecting...'
+        statusEl.classList.remove('connected')
+
+        if (!peer || peer.destroyed) {
+          initPeer()
+        } else if (peer.disconnected) {
+          peer.reconnect()
+        } else if (!isHost) {
+          connectToPeer(targetId)
+        }
+      })
+
       function drawGrid() {
-        ctx.save() // Locks your current pen settings safely away
-
-        // Tells the browser to slide the grid BEHIND the eraser holes
+        ctx.save()
         ctx.globalCompositeOperation = 'destination-over'
-
         ctx.lineWidth = 1
 
         const maxW = window.innerWidth * 2
         const maxH = window.innerHeight * 2
 
-        // Major Grid Lines (100px)
         ctx.beginPath()
         ctx.strokeStyle = 'rgba(0, 123, 255, 0.15)'
         for (let x = 0; x <= maxW; x += 100) {
@@ -373,7 +439,6 @@
         }
         ctx.stroke()
 
-        // Minor Grid Lines (20px)
         ctx.beginPath()
         ctx.strokeStyle = 'rgba(0, 123, 255, 0.05)'
         for (let x = 0; x <= maxW; x += 20) {
@@ -386,7 +451,7 @@
         }
         ctx.stroke()
 
-        ctx.restore() // Re-opens your drawing settings exactly as they were
+        ctx.restore()
       }
 
       function sendData(data) {
@@ -394,8 +459,8 @@
           conn.send(data)
         }
       }
-      resizeCanvas()
 
+      resizeCanvas()
       initPeer()
     </script>
   </body>
