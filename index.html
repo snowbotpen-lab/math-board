@@ -429,7 +429,17 @@
       // Network Integration Core
       function handleRemoteDraw(data) {
         drawingActions.push(data.action)
-        redrawCanvas()
+
+        if (data.action.tool === 'eraser') {
+          // Same reasoning as commitAction: erasing needs a full redraw
+          // so the grid still shows through correctly.
+          redrawCanvas()
+        } else {
+          ctx.save()
+          ctx.scale(zoomLevel, zoomLevel)
+          drawSegment(data.action)
+          ctx.restore()
+        }
       }
 
       // Merge a reconnect sync instead of overwriting local history, so
